@@ -97,12 +97,21 @@ class ConnectionService: NSObject {
             }
         }
     }
- 
+
+    private var pendingDisconnectHandlers: [((Result<Void>) -> ())] = []
+    private var taskTerminated:Bool = false
+
     /// Describes current connection state
     private(set) var state: State = .disconnected {
         didSet {
             if state == .connected {
                 didConnect()
+            }
+            if oldValue == .disconnecting && state == .disconnected && !pendingDisconnectHandlers.isEmpty {
+                for handler in pendingDisconnectHandlers {
+                    handler(.success(Void()))
+                }
+                pendingDisconnectHandlers = []
             }
             if oldValue != state {
                 NotificationCenter.default.post(name: ConnectionService.stateChanged, object: self)
@@ -189,12 +198,27 @@ class ConnectionService: NSObject {
             return
         }
         
+        if let handler = handler {
+            pendingDisconnectHandlers.append(handler)
+        }
+
+        if self.state == .disconnecting {
+            return
+        }
+        
+
+
         self.state = .disconnecting
         
         // Wait 6s before actually marking connection as disconnected
         DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
-            self.state = .disconnected
-            handler?(.success(Void()))
+            // if the task was terminated already  before 6 sec , then it will not show disconnected again
+            if(!self.taskTerminated){
+                self.state = .disconnected
+            }
+            
+            // Reset the taskterminated value
+           self.taskTerminated = false
         }
     }
     
@@ -320,8 +344,6 @@ class ConnectionService: NSObject {
             return
         }
         
-        state = .disconnecting
-
         guard let helper = helperService.connection?.remoteObjectProxy as? OpenVPNHelperProtocol else {
             self.state = .connected
             handler(.failure(Error.noHelperConnection))
@@ -801,9 +823,10 @@ class ConnectionService: NSObject {
 extension ConnectionService: ClientProtocol {
     
     func taskTerminated(reply: @escaping () -> Void) {
-        state = .disconnecting
         reply()
-        coolDown()
+        self.state = .disconnected
+        // Task terminated in case , vpn is disconnected before 6 sec, the app stills waits 6 sec to show user that it need to wait more to get disconnected, in this variable we are passing value to taskTerminated to let app know the task was terminated when 6 sec timer will finish.
+        taskTerminated = true
         configURL = nil
         handler = nil
     }
